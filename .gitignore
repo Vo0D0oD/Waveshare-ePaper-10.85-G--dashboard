@@ -1,0 +1,10 @@
+dashboard.log*
+token.json
+credentials.json
+strava_token.json
+claude_creds.json
+auth.json
+roborock_session.pkl
+roborock_stats.json
+__pycache__/
+*.mono-backup

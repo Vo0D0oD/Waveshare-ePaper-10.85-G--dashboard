@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
 from logging.handlers import RotatingFileHandler
 
+# --- 10.85" e-Paper HAT+ (G): black / white / yellow / red ---
+from epd_color import ColorEPD, BLACK, WHITE, YELLOW, RED
+
 # --- GMAIL IMPORTS ---
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -49,7 +52,7 @@ ENABLE_ROBOROCK = False
 ENABLE_ANTIGRAVITY = False
 ENABLE_CODEX = False
 ENABLE_CLAUDE = False
-ENABLE_SPOTIFY = False
+ENABLE_SPOTIFY = True
 
 # --- API ENDPOINTS ---
 API_ENDPOINTS = {
@@ -68,7 +71,7 @@ LOCATION_LAT = 44.8140857
 LOCATION_LON = 20.3934271
 
 PRINTER_CONF = {
-    'IP': '192.168....',
+    'IP': '127.0.0.1',
     'SERIAL': '....',
     'ACCESS_CODE': '....'
 }
@@ -116,7 +119,6 @@ finally:
     os.chdir(_prev_cwd)
 
 try:
-    from waveshare_epd import epd10in85
     import bambulabs_api as bl
     from roborock.web_api import RoborockApiClient
     from roborock.devices.device_manager import create_device_manager, UserParams
@@ -150,13 +152,31 @@ EPD_DEBUG = False
 if EPD_DEBUG:
     logging.getLogger("waveshare_epd").setLevel(logging.DEBUG)
 
-# --- PANEL RE-INIT STRATEGY ---
-# The single-core Pi Zero 1 latches the panel BUSY line after the first partial
-# update, so it needs a hardware reset (init_Part) before every frame. Faster
-# multi-core boards (Zero 2 W, Pi 3/4/5) do not have this issue, so we skip the
-# extra re-init there to avoid needless latency and ghosting. Detected by core
-# count: Zero 1 = 1 core, everything newer = 4+.
-PANEL_REINIT_EACH_FRAME = (os.cpu_count() or 1) < 2
+# --- REFRESH SCHEDULE (10.85" e-Paper HAT+ (G), 4-colour) ---
+# This panel has NO partial refresh: every update is a full ~21 s flash. Waveshare
+# asks for at least 180 s between refreshes and at least one refresh every 24 h,
+# and for the panel to be put to sleep while idle (ColorEPD.refresh() does that
+# after every frame). 300 s keeps a comfortable margin; the on-screen clock can
+# therefore be up to REFRESH_SECONDS out of date.
+REFRESH_SECONDS = 300
+MIN_REFRESH_SECONDS = 180
+REFRESH_SECONDS = max(REFRESH_SECONDS, MIN_REFRESH_SECONDS)
+
+# Usage bars turn yellow / red as a limit gets close.
+USAGE_WARN_PCT = 70
+USAGE_CRIT_PCT = 90
+
+
+def level_color(pct):
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        return BLACK
+    if pct >= USAGE_CRIT_PCT:
+        return RED
+    if pct >= USAGE_WARN_PCT:
+        return YELLOW
+    return BLACK
 
 icon_cache = {}
 global_printer = None
@@ -827,12 +847,12 @@ def update_data_thread():
 def draw_icon(draw, x, y, name, size=(40, 40), is_white=False):
     icon = get_cached_icon(name, size, is_white)
     if icon:
-        draw.bitmap((x, y), icon, fill=255 if is_white else 0)
+        draw.bitmap((x, y), icon, fill=WHITE if is_white else BLACK)
     else:
-        draw.rectangle((x, y, x + size[0], y + size[1]), outline=255 if is_white else 0)
+        draw.rectangle((x, y, x + size[0], y + size[1]), outline=WHITE if is_white else BLACK)
 
 
-def draw_sparkline(draw, x, y, data, max_items=50, width=400, height=60, color=0, style="bar"):
+def draw_sparkline(draw, x, y, data, max_items=50, width=400, height=60, color=BLACK, style="bar"):
     if not data: return
     max_val = max(data) if max(data) > 0 else 1
     step = width / max(max_items - 1, 1)
@@ -872,8 +892,11 @@ def get_weather_icon(code, is_day=1):
 
 
 def render_screen(epd, fonts):
-    Himage = Image.new('1', (epd.width, epd.height), 255)
+    Himage = Image.new('RGB', (epd.width, epd.height), WHITE)
     draw = ImageDraw.Draw(Himage)
+    # Only four ink colours exist on the panel, so antialiased glyph edges would
+    # just be snapped back to them. Draw crisp 1-bit glyphs, like the mono build.
+    draw.fontmode = "1"
 
     if not data_store.lock.acquire(timeout=2.0): return Himage
     try:
@@ -902,75 +925,75 @@ def render_screen(epd, fonts):
     y1 = 20
     if ENABLE_STRAVA:
         draw_icon(draw, col1_x, y1, "icon_strava", (60, 60))
-        draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=0)
+        draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=BLACK)
 
         now_y = datetime.now().year
         draw.text((col1_x + 70, y1 + 35),
                   f"{now_y}: {strava.get('distance_curr', 0)} km | {now_y - 1}: {strava.get('distance_prev', 0)} km",
-                  font=fonts['20'], fill=0)
+                  font=fonts['20'], fill=BLACK)
         draw.text((col1_x + 70, y1 + 60),
                   f"Total: {strava.get('total_distance', 0)} km | {strava.get('rides', 0)} acts", font=fonts['20'],
-                  fill=0)
+                  fill=BLACK)
 
         draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (30, 30))
-        draw.text((col1_x + 105, y1 + 90), f"{strava.get('bike_total', 0)} km", font=fonts['20'], fill=0)
+        draw.text((col1_x + 105, y1 + 90), f"{strava.get('bike_total', 0)} km", font=fonts['20'], fill=BLACK)
 
         draw_icon(draw, col1_x + 220, y1 + 85, "icon_hike", (30, 30))
-        draw.text((col1_x + 255, y1 + 90), f"{strava.get('hike_total', 0)} km", font=fonts['20'], fill=0)
+        draw.text((col1_x + 255, y1 + 90), f"{strava.get('hike_total', 0)} km", font=fonts['20'], fill=BLACK)
 
     else:
         draw_icon(draw, col1_x, y1, "icon_cpu", (50, 50))
-        draw.text((col1_x + 60, y1), f"SYSTEM LOAD: {sysload['cpu']}%", font=fonts['28'], fill=0)
-        draw.text((col1_x + 60, y1 + 35), f"RAM Free: {sysload['ram_free']} MB", font=fonts['20'], fill=0)
+        draw.text((col1_x + 60, y1), f"SYSTEM LOAD: {sysload['cpu']}%", font=fonts['28'], fill=BLACK)
+        draw.text((col1_x + 60, y1 + 35), f"RAM Free: {sysload['ram_free']} MB", font=fonts['20'], fill=BLACK)
         draw_sparkline(draw, col1_x + 60, y1 + 60, list(sysload['history']), max_items=30, width=350, height=40,
                        style="bar")
 
-    draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
+    draw.line((col1_x, 150, col_w - 20, 150), fill=BLACK, width=2)
 
     # Widget 2: Bambu or Crypto
     y2 = 170
     if ENABLE_BAMBU:
         p_status = str(printer.get('status', 'OFFLINE')).upper()
         draw_icon(draw, col1_x, y2, "icon_3d", (60, 60))
-        draw.text((col1_x + 70, y2), f"PRINTER: {p_status}", font=fonts['28'], fill=0)
+        draw.text((col1_x + 70, y2), f"PRINTER: {p_status}", font=fonts['28'], fill=BLACK)
         if p_status not in ["OFFLINE", "UNKNOWN", "FINISH"]:
             percent = printer.get('percentage', 0)
-            draw.rectangle((col1_x + 70, y2 + 40, col1_x + 400, y2 + 60), outline=0)
-            draw.rectangle((col1_x + 70, y2 + 40, col1_x + 70 + int(330 * (percent / 100)), y2 + 60), fill=0)
+            draw.rectangle((col1_x + 70, y2 + 40, col1_x + 400, y2 + 60), outline=BLACK)
+            draw.rectangle((col1_x + 70, y2 + 40, col1_x + 70 + int(330 * (percent / 100)), y2 + 60), fill=BLACK)
             draw.text((col1_x + 70, y2 + 70),
                       f"{percent}% | Rem: {printer.get('remaining_time', '0')}m | {printer.get('layers', '0/0')} L",
-                      font=fonts['20'], fill=0)
+                      font=fonts['20'], fill=BLACK)
     else:
         draw_icon(draw, col1_x, y2, "icon_btc", (50, 50))
-        draw.text((col1_x + 60, y2), f"BTC: ${crypto['btc']}", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y2), f"BTC: ${crypto['btc']}", font=fonts['28'], fill=BLACK)
         draw_sparkline(draw, col1_x + 60, y2 + 35, crypto['btc_hist'], max_items=50, width=350, height=35, style="bar")
 
         draw_icon(draw, col1_x, y2 + 80, "icon_eth", (50, 50))
-        draw.text((col1_x + 60, y2 + 80), f"ETH: ${crypto['eth']}", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y2 + 80), f"ETH: ${crypto['eth']}", font=fonts['28'], fill=BLACK)
         draw_sparkline(draw, col1_x + 60, y2 + 115, crypto['eth_hist'], max_items=50, width=350, height=35, style="bar")
 
-    draw.line((col1_x, 320, col_w - 20, 320), fill=0, width=2)
+    draw.line((col1_x, 320, col_w - 20, 320), fill=BLACK, width=2)
 
     # Widget 3: Roborock or Ping
     y3 = 340
     if ENABLE_ROBOROCK:
         draw_icon(draw, col1_x, y3, "icon_roborock", (50, 50))
-        draw.text((col1_x + 60, y3), f"Bat: {rob['battery']}% | {rob['status']}", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y3), f"Bat: {rob['battery']}% | {rob['status']}", font=fonts['28'], fill=BLACK)
         if rob['is_cleaning']:
             draw.text((col1_x + 60, y3 + 35), f"Clean: {rob['current_area']:.1f} m2 ({rob['pct']:.0f}%)",
-                      font=fonts['24'], fill=0)
+                      font=fonts['24'], fill=BLACK)
             clamped_pct = min(rob['pct'], 100)
-            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 390, y3 + 90), outline=0)
-            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 60 + int(330 * (clamped_pct / 100)), y3 + 90), fill=0)
+            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 390, y3 + 90), outline=BLACK)
+            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 60 + int(330 * (clamped_pct / 100)), y3 + 90), fill=BLACK)
         else:
             draw.text((col1_x + 60, y3 + 35), f"Last: {rob['last_date']} | {rob['ref_area']:.1f} m2", font=fonts['24'],
-                      fill=0)
+                      fill=BLACK)
     elif ENABLE_ANTIGRAVITY:
         draw_icon(draw, col1_x, y3, "icon_cpu", (50, 50))
-        draw.text((col1_x + 60, y3), "ANTIGRAVITY USAGE", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y3), "ANTIGRAVITY USAGE", font=fonts['28'], fill=BLACK)
         
         if antigravity.get('error'):
-            draw.text((col1_x + 60, y3 + 35), "Error loading data", font=fonts['20'], fill=0)
+            draw.text((col1_x + 60, y3 + 35), "Error loading data", font=fonts['20'], fill=BLACK)
         else:
             models = antigravity.get('models', [])
             opus = next((m for m in models if m.get('modelId') == 'claude-opus-4-6-thinking'), None)
@@ -983,20 +1006,20 @@ def render_screen(epd, fonts):
                     pct = m_data.get('usedPercentage', 0)
                     rem_time = time_until(m_data.get('resetDate'))
                     
-                    draw.text((col1_x + 60, y_off), f"{label} {pct}% | In {rem_time}", font=fonts['20'], fill=0)
+                    draw.text((col1_x + 60, y_off), f"{label} {pct}% | In {rem_time}", font=fonts['20'], fill=BLACK)
                     
                     bx, bw, bh = col1_x + 60, 330, 15
-                    draw.rectangle((bx, y_off + 25, bx + bw, y_off + 25 + bh), outline=0, width=2)
+                    draw.rectangle((bx, y_off + 25, bx + bw, y_off + 25 + bh), outline=BLACK, width=2)
                     fill_w = int((bw - 4) * min(pct / 100.0, 1.0))
-                    if fill_w > 0: draw.rectangle((bx + 2, y_off + 27, bx + 2 + fill_w, y_off + 25 + bh - 2), fill=0)
+                    if fill_w > 0: draw.rectangle((bx + 2, y_off + 27, bx + 2 + fill_w, y_off + 25 + bh - 2), fill=level_color(pct))
                     
                     y_off += 50
     elif ENABLE_CODEX:
         draw_icon(draw, col1_x, y3, "icon_cpu", (50, 50))
-        draw.text((col1_x + 60, y3), "CODEX AI USAGE", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y3), "CODEX AI USAGE", font=fonts['28'], fill=BLACK)
 
         if codex.get('error'):
-            draw.text((col1_x + 60, y3 + 40), "Codex Usage Error", font=fonts['20'], fill=0)
+            draw.text((col1_x + 60, y3 + 40), "Codex Usage Error", font=fonts['20'], fill=BLACK)
         else:
             # 7-Day limit only: OpenAI has disabled the 5-hour window for now.
             pct_7d = codex.get('seven_day', {}).get('utilization', 0)
@@ -1004,18 +1027,18 @@ def render_screen(epd, fonts):
             rem_7d = time_until(resets_7d)
 
             draw.text((col1_x + 60, y3 + 40), f"7-Day Limit: {round(pct_7d)}% (In {rem_7d})",
-                      font=fonts['20'], fill=0)
+                      font=fonts['20'], fill=BLACK)
             bx, bw, bh = col1_x + 60, 330, 15
-            draw.rectangle((bx, y3 + 70, bx + bw, y3 + 70 + bh), outline=0, width=2)
+            draw.rectangle((bx, y3 + 70, bx + bw, y3 + 70 + bh), outline=BLACK, width=2)
             fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
             if fill_w > 0:
-                draw.rectangle((bx + 2, y3 + 72, bx + 2 + fill_w, y3 + 70 + bh - 2), fill=0)
+                draw.rectangle((bx + 2, y3 + 72, bx + 2 + fill_w, y3 + 70 + bh - 2), fill=level_color(pct_7d))
     else:
         draw_icon(draw, col1_x, y3, "icon_wifi", (50, 50))
-        draw.text((col1_x + 60, y3), f"Internet Quality: {ping['current']} ms", font=fonts['28'], fill=0)
+        draw.text((col1_x + 60, y3), f"Internet Quality: {ping['current']} ms", font=fonts['28'], fill=BLACK)
         draw_sparkline(draw, col1_x, y3 + 60, list(ping['history']), max_items=50, width=400, height=40, style="bar")
 
-    draw.line((col_w, 10, col_w, 470), fill=0, width=2)
+    draw.line((col_w, 10, col_w, 470), fill=BLACK, width=2)
 
     # --- COLUMN 2 (Weather) ---
     col2_x = col_w + 20
@@ -1034,11 +1057,11 @@ def render_screen(epd, fonts):
         temp_rounded = math.floor(temp + 0.5)
 
         draw_icon(draw, col2_x, 20, get_weather_icon(w_code, is_day), (90, 90))
-        draw.text((col2_x + 100, 10), f"{temp_rounded}°C", font=fonts['80'], fill=0)
+        draw.text((col2_x + 100, 10), f"{temp_rounded}°C", font=fonts['80'], fill=BLACK)
 
         uv_x, uv_y = col2_x + 320, 25
         uv_rounded = math.floor(uv_index + 0.5)
-        draw.text((uv_x, uv_y), "UV", font=fonts['28'], fill=0)
+        draw.text((uv_x, uv_y), "UV", font=fonts['28'], fill=BLACK)
         uv_val_str = str(uv_rounded)
         try:
             bbox = draw.textbbox((0, 0), uv_val_str, font=fonts['60'])
@@ -1049,33 +1072,36 @@ def render_screen(epd, fonts):
         uv_val_x, uv_val_y = uv_x + 45, 5
         if uv_rounded >= 6:
             pad = 5
-            draw.rectangle((uv_val_x - pad, uv_val_y - pad + 10, uv_val_x + tw + pad, uv_val_y + th + pad), fill=0)
-            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=255)
+            # UV 8+ is red with white text; 6-7 is yellow with black text.
+            uv_high = uv_rounded >= 8
+            draw.rectangle((uv_val_x - pad, uv_val_y - pad + 10, uv_val_x + tw + pad, uv_val_y + th + pad),
+                           fill=RED if uv_high else YELLOW)
+            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=WHITE if uv_high else BLACK)
         else:
-            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=0)
+            draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=BLACK)
 
-        draw.text((col2_x + 100, 95), f"Humidity: {hum}%", font=fonts['20'], fill=0)
-        draw.text((col2_x + 100, 120), f"Press: {pres} hPa", font=fonts['20'], fill=0)
+        draw.text((col2_x + 100, 95), f"Humidity: {hum}%", font=fonts['20'], fill=BLACK)
+        draw.text((col2_x + 100, 120), f"Press: {pres} hPa", font=fonts['20'], fill=BLACK)
 
-        draw.line((col2_x, 140, col2_x + col_w - 40, 140), fill=0, width=2)
+        draw.line((col2_x, 140, col2_x + col_w - 40, 140), fill=BLACK, width=2)
 
         y_c2 = 160
         draw_icon(draw, col2_x + 5, y_c2, "icon_wind", (30, 30))
 
         cx, cy, r = col2_x + 80, y_c2 + 80, 60
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=0, width=2)
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=BLACK, width=2)
 
         for angle in range(0, 360, 45):
             rad_tick = math.radians(angle)
             inner_r = r - 8 if angle % 90 == 0 else r - 4
             tx1, ty1 = cx + inner_r * math.cos(rad_tick), cy + inner_r * math.sin(rad_tick)
             tx2, ty2 = cx + r * math.cos(rad_tick), cy + r * math.sin(rad_tick)
-            draw.line((tx1, ty1, tx2, ty2), fill=0, width=2)
+            draw.line((tx1, ty1, tx2, ty2), fill=BLACK, width=2)
 
-        draw.text((cx - 8, cy - r - 22), "N", font=fonts['20'], fill=0)
-        draw.text((cx - 8, cy + r + 4), "S", font=fonts['20'], fill=0)
-        draw.text((cx + r + 6, cy - 10), "E", font=fonts['20'], fill=0)
-        draw.text((cx - r - 24, cy - 10), "W", font=fonts['20'], fill=0)
+        draw.text((cx - 8, cy - r - 22), "N", font=fonts['20'], fill=BLACK)
+        draw.text((cx - 8, cy + r + 4), "S", font=fonts['20'], fill=BLACK)
+        draw.text((cx + r + 6, cy - 10), "E", font=fonts['20'], fill=BLACK)
+        draw.text((cx - r - 24, cy - 10), "W", font=fonts['20'], fill=BLACK)
 
         rad_arrow = math.radians(wind_dir - 90)
         tip_x = cx + (r - 12) * math.cos(rad_arrow)
@@ -1085,8 +1111,8 @@ def render_screen(epd, fonts):
         left_y = cy + 20 * math.sin(rad_arrow + base_angle)
         right_x = cx + 20 * math.cos(rad_arrow - base_angle)
         right_y = cy + 20 * math.sin(rad_arrow - base_angle)
-        draw.polygon([(tip_x, tip_y), (left_x, left_y), (right_x, right_y)], fill=0)
-        draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=0)
+        draw.polygon([(tip_x, tip_y), (left_x, left_y), (right_x, right_y)], fill=BLACK)
+        draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=BLACK)
 
         spd_text = f"{wind_spd} km/h"
         try:
@@ -1095,11 +1121,11 @@ def render_screen(epd, fonts):
         except AttributeError:
             tw = draw.textsize(spd_text, font=fonts['20'])[0]
 
-        draw.text((cx - tw / 2, cy + 25), spd_text, font=fonts['20'], fill=0)
+        draw.text((cx - tw / 2, cy + 25), spd_text, font=fonts['20'], fill=BLACK)
 
         aqi_x = col2_x + 180
-        draw.text((aqi_x, y_c2 + 10), "AIR QUALITY", font=fonts['20'], fill=0)
-        draw.text((aqi_x, y_c2 + 55), "AQI:", font=fonts['28'], fill=0)
+        draw.text((aqi_x, y_c2 + 10), "AIR QUALITY", font=fonts['20'], fill=BLACK)
+        draw.text((aqi_x, y_c2 + 55), "AQI:", font=fonts['28'], fill=BLACK)
 
         aqi_str = str(aqi)
         try:
@@ -1112,12 +1138,15 @@ def render_screen(epd, fonts):
 
         if aqi >= 50:
             pad = 20
-            draw.rectangle((val_x - pad, val_y - pad + 15, val_x + tw + pad, val_y + th + pad - 5), fill=0)
-            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=255)
+            # AQI 100+ is red with white text; 50-99 is yellow with black text.
+            aqi_high = aqi >= 100
+            draw.rectangle((val_x - pad, val_y - pad + 15, val_x + tw + pad, val_y + th + pad - 5),
+                           fill=RED if aqi_high else YELLOW)
+            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=WHITE if aqi_high else BLACK)
         else:
-            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=0)
+            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=BLACK)
 
-        draw.line((col2_x, 320, col2_x + col_w - 40, 320), fill=0, width=2)
+        draw.line((col2_x, 320, col2_x + col_w - 40, 320), fill=BLACK, width=2)
 
         hourly = weather.get('hourly', {})
         times = hourly.get('time', [])
@@ -1134,59 +1163,59 @@ def render_screen(epd, fonts):
             idx = start_idx + i
             if idx < len(times):
                 off_x = col2_x + (i * 105)
-                draw.text((off_x + 10, 340), f"{times[idx].split('T')[1][:5]}", font=fonts['24'], fill=0)
+                draw.text((off_x + 10, 340), f"{times[idx].split('T')[1][:5]}", font=fonts['24'], fill=BLACK)
                 draw_icon(draw, off_x + 15, 375, get_weather_icon(codes[idx], 1), (60, 60))
                 f_temp = math.floor(temps[idx] + 0.5)
-                draw.text((off_x + 15, 440), f"{f_temp}°C", font=fonts['24'], fill=0)
+                draw.text((off_x + 15, 440), f"{f_temp}°C", font=fonts['24'], fill=BLACK)
 
-    draw.line((col_w * 2, 10, col_w * 2, 470), fill=0, width=2)
+    draw.line((col_w * 2, 10, col_w * 2, 470), fill=BLACK, width=2)
 
     # --- COLUMN 3 (Time, Claude/Spotify/Progress, Gmail) ---
     col3_x = col_w * 2 + 30
     dt = datetime.now()
 
     # 1. Time & Date
-    draw.text((col3_x, 10), dt.strftime("%H:%M"), font=fonts['clock'], fill=0)
+    draw.text((col3_x, 10), dt.strftime("%H:%M"), font=fonts['clock'], fill=BLACK)
 
     date_str = dt.strftime("%d %B %Y")
     day_str = dt.strftime("%a").upper()
 
-    draw.text((col3_x, 170), date_str, font=fonts['32'], fill=0)
-    draw.text((col3_x + 340, 170), day_str, font=fonts['32'], fill=0)
+    draw.text((col3_x, 170), date_str, font=fonts['32'], fill=BLACK)
+    draw.text((col3_x + 340, 170), day_str, font=fonts['32'], fill=BLACK)
 
-    draw.line((col3_x, 220, epd.width - 20, 220), fill=0, width=2)
+    draw.line((col3_x, 220, epd.width - 20, 220), fill=BLACK, width=2)
 
     # 2. Claude AI OR Spotify OR Time Progress
     sp_y = 240
     # Clear background for widget
-    draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=255)
+    draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=WHITE)
 
     if ENABLE_CLAUDE:
-        draw.text((col3_x, sp_y), "CLAUDE AI USAGE", font=fonts['28'], fill=0)
+        draw.text((col3_x, sp_y), "CLAUDE AI USAGE", font=fonts['28'], fill=BLACK)
 
         if claude.get('error'):
-            draw.text((col3_x, sp_y + 50), "Claude Usage Error", font=fonts['24'], fill=0)
+            draw.text((col3_x, sp_y + 50), "Claude Usage Error", font=fonts['24'], fill=BLACK)
         else:
             # 5-Hour Limit
             pct_5h = claude.get('five_hour', {}).get('utilization', 0)
             resets_5h = claude.get('five_hour', {}).get('resets_at')
             rem_5h = time_until(resets_5h)
 
-            draw.text((col3_x, sp_y + 40), f"5-Hour Limit: {pct_5h}% (Resets in {rem_5h})", font=fonts['20'], fill=0)
+            draw.text((col3_x, sp_y + 40), f"5-Hour Limit: {pct_5h}% (Resets in {rem_5h})", font=fonts['20'], fill=BLACK)
             bx, bw, bh = col3_x, 400, 15
-            draw.rectangle((bx, sp_y + 65, bx + bw, sp_y + 65 + bh), outline=0, width=2)
+            draw.rectangle((bx, sp_y + 65, bx + bw, sp_y + 65 + bh), outline=BLACK, width=2)
             fill_w = int((bw - 4) * min(pct_5h / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 67, bx + 2 + fill_w, sp_y + 65 + bh - 2), fill=0)
+            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 67, bx + 2 + fill_w, sp_y + 65 + bh - 2), fill=level_color(pct_5h))
 
             # 7-Day Limit
             pct_7d = claude.get('seven_day', {}).get('utilization', 0)
             resets_7d = claude.get('seven_day', {}).get('resets_at')
             rem_7d = time_until(resets_7d)
 
-            draw.text((col3_x, sp_y + 90), f"7-Day Limit: {pct_7d}% (Resets in {rem_7d})", font=fonts['20'], fill=0)
-            draw.rectangle((bx, sp_y + 115, bx + bw, sp_y + 115 + bh), outline=0, width=2)
+            draw.text((col3_x, sp_y + 90), f"7-Day Limit: {pct_7d}% (Resets in {rem_7d})", font=fonts['20'], fill=BLACK)
+            draw.rectangle((bx, sp_y + 115, bx + bw, sp_y + 115 + bh), outline=BLACK, width=2)
             fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 117, bx + 2 + fill_w, sp_y + 115 + bh - 2), fill=0)
+            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 117, bx + 2 + fill_w, sp_y + 115 + bh - 2), fill=level_color(pct_7d))
 
     elif ENABLE_SPOTIFY:
         if spotify['cover']:
@@ -1201,13 +1230,13 @@ def render_screen(epd, fonts):
             words = spotify['text'].split(' - ')
             artist = words[0] if len(words) > 0 else "Unknown"
             track = words[1] if len(words) > 1 else ""
-            draw.text((col3_x + 180, sp_y + 10), artist[:20], font=fonts['28'], fill=0)
-            draw.text((col3_x + 140, sp_y + 50), track[:25], font=fonts['24'], fill=0)
+            draw.text((col3_x + 180, sp_y + 10), artist[:20], font=fonts['28'], fill=BLACK)
+            draw.text((col3_x + 140, sp_y + 50), track[:25], font=fonts['24'], fill=BLACK)
 
     else:
         # Fallback: Time Progress
         tp_y = sp_y
-        draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
+        draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=BLACK)
 
         day_pct = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
         days_in_m = calendar.monthrange(dt.year, dt.month)[1]
@@ -1216,27 +1245,27 @@ def render_screen(epd, fonts):
         year_pct = (dt.timetuple().tm_yday - 1 + (dt.hour / 24.0)) / days_in_y
 
         def draw_prog(y_offset, label, pct):
-            draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=0)
+            draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=BLACK)
             bx = col3_x + 110
             bw = 200
             bh = 20
-            draw.rectangle((bx, tp_y + y_offset + 2, bx + bw, tp_y + y_offset + bh + 2), outline=0, width=2)
+            draw.rectangle((bx, tp_y + y_offset + 2, bx + bw, tp_y + y_offset + bh + 2), outline=BLACK, width=2)
             if pct > 0:
                 fill_w = int((bw - 4) * min(pct, 1.0))
                 if fill_w > 0:
-                    draw.rectangle((bx + 2, tp_y + y_offset + 4, bx + 2 + fill_w, tp_y + y_offset + bh), fill=0)
-            draw.text((bx + bw + 15, tp_y + y_offset), f"{int(pct * 100)}%", font=fonts['24'], fill=0)
+                    draw.rectangle((bx + 2, tp_y + y_offset + 4, bx + 2 + fill_w, tp_y + y_offset + bh), fill=BLACK)
+            draw.text((bx + bw + 15, tp_y + y_offset), f"{int(pct * 100)}%", font=fonts['24'], fill=BLACK)
 
         draw_prog(40, "DAY", day_pct)
         draw_prog(75, "MONTH", month_pct)
         draw_prog(110, "YEAR", year_pct)
 
-    draw.line((col3_x, 380, epd.width - 20, 380), fill=0, width=2)
+    draw.line((col3_x, 380, epd.width - 20, 380), fill=BLACK, width=2)
 
     # 3. Gmail
     gm_y = 400
     draw_icon(draw, col3_x, gm_y, "icon_mail", (60, 60))
-    draw.text((col3_x + 80, gm_y + 10), f"Unread Inbox: {gmail_unread}", font=fonts['35'], fill=0)
+    draw.text((col3_x + 80, gm_y + 10), f"Unread Inbox: {gmail_unread}", font=fonts['35'], fill=BLACK)
 
     return Himage
 
@@ -1253,17 +1282,13 @@ def main():
     epd = None
 
     try:
-        epd = epd10in85.EPD()
-        # Panel setup runs before the render loop, so it is not covered by the
-        # per-frame watchdog below. ReadBusy() has no timeout, so a panel that
-        # never releases BUSY (unplugged, half-seated, wedged) blocks here
-        # forever with no error anywhere. Arm the watchdog so it fails instead.
-        signal.alarm(120)
-        epd.init()
-        epd.Clear()
-        signal.alarm(0)
-        time.sleep(1)
-        epd.init_Part()
+        epd = ColorEPD()
+        # No init()/Clear() here: every refresh below does reset + init + frame
+        # + sleep by itself, and a full-frame write overwrites whatever was on
+        # the panel, so a separate Clear would only cost one extra ~21 s flash.
+        # Check once that the fast 2-bit packer produces exactly the bytes the
+        # vendor driver would (pure CPU work, so it runs outside the watchdog).
+        epd.verify_fast_path()
 
         def load_font(name, size):
             return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
@@ -1289,43 +1314,29 @@ def main():
             t_robo.daemon = True
             t_robo.start()
 
-        refresh_counter = 0
+        frame_counter = 0
 
         while True:
             start_time = time.time()
             try:
-                # CPU-bound rendering runs OUTSIDE the hardware watchdog: on a
-                # Pi Zero 1 it can be slow, but it never hangs, so a slow render
-                # must not trigger a reboot and throw away the frame.
+                # CPU-bound rendering and packing run OUTSIDE the hardware
+                # watchdog: on a Pi Zero 1 they can be slow, but they never
+                # hang, so a slow render must not trigger a restart.
                 image = render_screen(epd, fonts)
                 buf = epd.getbuffer(image)
 
-                if refresh_counter >= 600:
-                    logging.info("Full Refresh cycle")
-                    signal.alarm(90)  # full refresh flashes the whole panel, it is slow
-                    epd.init()
-                    epd.display(buf)
-                    time.sleep(2)
-                    epd.init_Part()
-                    signal.alarm(0)
-                    refresh_counter = 0
-                else:
-                    logging.debug("Partial Refresh")
-                    signal.alarm(30)  # watchdog guards only the SPI/BUSY transfer
-                    # On the Pi Zero 1 the panel reliably completes only the
-                    # FIRST partial after an init: afterwards the controller
-                    # latches BUSY low forever. init_Part() does a hardware reset
-                    # (RST pin) that pulls it out of that state, so re-arm before
-                    # every frame. Skipped on faster boards (see the flag above).
-                    if PANEL_REINIT_EACH_FRAME:
-                        epd.init_Part()
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
-                    signal.alarm(0)
-                    refresh_counter += 1
+                logging.info("Refreshing panel (full 4-colour refresh, ~21 s)")
+                # The watchdog guards only the SPI/BUSY part: reset + init +
+                # frame + ~21 s refresh + deep sleep. ReadBusy() has no
+                # timeout of its own, so a wedged panel would block forever.
+                signal.alarm(120)
+                epd.refresh(buf)
+                signal.alarm(0)
+                frame_counter += 1
 
                 del image
                 del buf
-                if refresh_counter % 10 == 0: gc.collect()
+                gc.collect()
 
             except HardwareTimeoutError:
                 logging.critical("HARDWARE HANG DETECTED!")
@@ -1340,14 +1351,15 @@ def main():
                 signal.alarm(0)
                 logging.error(f"Unexpected error in main: {e}")
 
+            # Start-to-start spacing is REFRESH_SECONDS (clamped to >= 180 s above).
             elapsed = time.time() - start_time
-            sleep_time = max(5, 60 - elapsed)
-            time.sleep(sleep_time)
+            time.sleep(max(REFRESH_SECONDS - elapsed, 5))
 
     except KeyboardInterrupt:
         try:
             signal.alarm(0)
-            epd10in85.epdconfig.module_exit(cleanup=True)
+            if epd is not None:
+                epd.module_exit()
         except:
             pass
         exit()

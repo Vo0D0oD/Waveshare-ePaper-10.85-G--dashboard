@@ -55,6 +55,25 @@ sudo apt install -y python3-gpiozero python3-lgpio python3-spidev
 
 ### 3. Display Library
 
+#### Using the 10.85" e-Paper HAT+ (G) (black / white / yellow / red)
+
+This branch drives the four-colour (G) panel instead of the monochrome one. Differences you will notice:
+
+* **No partial refresh.** Every update is a full ~21 s flash, so the dashboard refreshes every `REFRESH_SECONDS` (default 300 s, never below 180 s, which is Waveshare's minimum). The big clock can be up to that many minutes behind.
+* The panel is put to sleep after every refresh, as Waveshare requires when idle.
+* Yellow and red are used as warnings: usage bars turn yellow at 70 % and red at 90 %, and the UV / AQI boxes are yellow (UV 6-7, AQI 50-99) or red (UV 8+, AQI 100+). Thresholds are `USAGE_WARN_PCT` / `USAGE_CRIT_PCT` near the top of `main.py`.
+
+Setup:
+
+1. Copy `epd10in85g.py` from the Waveshare demo package for the (G) panel into `lib/waveshare_epd/`. It is not bundled here.
+2. Test the panel on its own first. This draws colour bars and refreshes once:
+```shell
+python3 test_color_panel.py --no-display   # only checks the packing code
+python3 test_color_panel.py                # real refresh, ~21 s
+```
+   Look for `fast packer matches vendor getbuffer: True`. If it says `False`, the dashboard still works, but packs each frame with the vendor routine, which is slow on a Pi Zero 1.
+3. Run `main.py` as described below.
+
 * The **patched** version of the epd10in85 library with fixed partial refresh issue already included in this package.
 
 * **(New)** Included support of Raspberry PI Zero 1.
